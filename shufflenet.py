@@ -2,48 +2,93 @@ import chainer
 import chainer.links as L
 import chainer.functions as F
 import functools as fun
+import collections
 import logging
 log = logging.getLogger(__name__)
 
 
-def seq(name, *layers):
-    """Create a Sequential with a name. This is done by creating a class
-       deriving chainer.Sequential on the fly.
+def describe_variable(name, v):
+    try:
+        shape = v.shape
+    except AttributeError:
+        shape = "(?)"  # "(shape not yet initialized)"
+    return "{}{}".format(name, shape)
 
-       (Not sure this is worth the obfuscation cost. This is just a
-       bit nicer when you print() the sequentials.)
 
-    """
+def describe_element(elt, prefix):
+    if hasattr(elt, 'namedparams'):
+        params = [
+            describe_variable(name, variable)
+            for name, variable in elt.namedparams()
+        ]
+        if len(params) > 2:
+            prefix = prefix + '  '
+            str_params = "\n{}".format(prefix) + ',\n{}'.format(prefix).join(
+                params)
+        else:
+            str_params = ', '.join(params)
+        return "{}({})".format(elt.__class__.__name__, str_params)
+    else:
+        return str(elt)
 
-    def __init__(self, *layers):
-        chainer.Sequential.__init__(self, *layers)
 
-    cls = type(name, (chainer.Sequential, ), dict(__init__=__init__))
-    return cls(*layers)
+class Seq(chainer.Chain):
+    def __init__(self, **named_layers):
+        chainer.Chain.__init__(self)
+        self._layers = collections.OrderedDict()
+        for k, v in named_layers.items():
+            self.add(k, v)
+
+    def add(self, name, layer):
+        with self.init_scope():
+            if hasattr(self, name):
+                raise KeyError("sequence {} already has attribute {}".format(
+                    self, name))
+            setattr(self, name, layer)
+            self._layers[name] = layer
+
+    def forward(self, x):
+        for layer in self._layers.values():
+            x = layer(x)
+        return x
+
+    def to_string(self, prefix=''):
+        buf = ''
+        for k, v in self._layers.items():
+            if isinstance(v, Seq):
+                buf += "{}{}\n{}".format(prefix, k,
+                                         v.to_string(prefix=(prefix + '  ')))
+            else:
+                buf += "{}{}\t{}\n".format(prefix, k,
+                                           describe_element(v, prefix))
+        return buf
+
+    def __str__(self):
+        return self.to_string()
 
 
 def _1x1_conv_bn_relu(out_channels):
     """1x1 Conv + BN + ReLU.
     """
-    return seq(
-        "_1x1_conv_bn_relu",
-        L.Convolution2D(
+    return Seq(
+        conv=L.Convolution2D(
             None, out_channels, ksize=1, stride=1, pad=0, nobias=True),
-        L.BatchNormalization(axis=(0, 2, 3)), F.relu)
+        bn=L.BatchNormalization(axis=(0, 2, 3)),
+        relu=F.relu)
 
 
 def _3x3_dwconv_bn(stride):
     """3x3 DWConv (depthwise convolution) + BN.
     """
-    return seq(
-        "_3x3_dwconv_bn",
-        L.DepthwiseConvolution2D(
+    return Seq(
+        dwconv=L.DepthwiseConvolution2D(
             None,
             channel_multiplier=1,
             ksize=3,
             stride=stride,
             pad=1,
-            nobias=True), L.BatchNormalization(axis=(0, 2, 3)))
+            nobias=True),
+        bn=L.BatchNormalization(axis=(0, 2, 3)))
 
 
 class ShuffleNetV2BasicBlock(chainer.Chain):
@@ -58,9 +103,10 @@ class ShuffleNetV2BasicBlock(chainer.Chain):
             assert 2 * branch_channels == out_channels, (
                 "ShuffleNetV2BasicBlock out_channels must be divisible by 2")
             # Note that in the basic block the 3x3 dwconv has stride=1.
-            self.branch = chainer.Sequential(
-                _1x1_conv_bn_relu(branch_channels), _3x3_dwconv_bn(stride=1),
-                _1x1_conv_bn_relu(branch_channels))
+            self.branch = Seq(
+                conv_bn_relu1=_1x1_conv_bn_relu(branch_channels),
+                dwconv_bn=_3x3_dwconv_bn(stride=1),
+                conv_bn_relu2=_1x1_conv_bn_relu(branch_channels))
 
     def forward(self, x):
         x1, x2 = F.split_axis(x, 2, axis=1)
@@ -88,11 +134,13 @@ class ShuffleNetV2DownsampleBlock(chainer.Chain):
             assert 2 * branch_channels == out_channels, (
                 "ShuffleNetV2BasicBlock out_channels must be divisible by 2")
             # Note that in the downsampling block the 3x3 dwconv has stride=2.
-            self.branch1 = chainer.Sequential(
-                _3x3_dwconv_bn(stride=2), _1x1_conv_bn_relu(branch_channels))
-            self.branch2 = chainer.Sequential(
-                _1x1_conv_bn_relu(branch_channels), _3x3_dwconv_bn(stride=2),
-                _1x1_conv_bn_relu(branch_channels))
+            self.branch1 = Seq(
+                dwconv_bn=_3x3_dwconv_bn(stride=2),
+                conv_bn_relu=_1x1_conv_bn_relu(branch_channels))
+            self.branch2 = Seq(
+                conv_bn_relu1=_1x1_conv_bn_relu(branch_channels),
+                dwconv_bn=_3x3_dwconv_bn(stride=2),
+                conv_bn_relu2=_1x1_conv_bn_relu(branch_channels))
 
     def forward(self, x):
         x1 = self.branch1(x)
@@ -102,12 +150,12 @@ class ShuffleNetV2DownsampleBlock(chainer.Chain):
 
 def ShuffleNetV2Stage(out_channels, repeat):
     assert repeat > 1, "ShuffleNetV2Stage: repeat must be > 1"
-    first = ShuffleNetV2DownsampleBlock(out_channels)
-    rest = ShuffleNetV2BasicBlock(out_channels)
 
-    stage = seq("Stage")
-    stage.append(first)
-    stage += rest.repeat(repeat - 1)
+    stage = Seq()
+    stage.add('downsample', ShuffleNetV2DownsampleBlock(out_channels))
+    for i in range(repeat - 1):
+        stage.add('basic{}'.format(i + 1),
+                  ShuffleNetV2BasicBlock(out_channels))
 
     return stage
 
@@ -142,27 +190,25 @@ def ShuffleNetV2Features(k):
         raise KeyError("unsupported k={}, supported values are {}".format(
             k, known_channels.keys()))
 
-    net = seq("Features")
+    net = Seq()
 
-    # Conv1
-    conv1 = seq(
-        "Conv1",
-        L.Convolution2D(3, channels[0], ksize=3, stride=2, pad=1, nobias=True),
-        L.BatchNormalization(axis=(0, 2, 3)), F.relu)
-    net.append(conv1)
-
-    max_pool = fun.partial(
-        F.max_pooling_2d, ksize=3, stride=2, pad=1, cover_all=False)
-    net.append(max_pool)
+    stage1 = Seq(
+        conv=L.Convolution2D(
+            3, channels[0], ksize=3, stride=2, pad=1, nobias=True),
+        bn=L.BatchNormalization(axis=(0, 2, 3)),
+        relu=F.relu,
+        max_pool=fun.partial(
+            F.max_pooling_2d, ksize=3, stride=2, pad=1, cover_all=False))
+    net.add("stage1", stage1)
 
     # Stage2, Stage3, Stage4.
     for i_stage, stage_repeat in enumerate(stage_repeats):
         out_channels = channels[1 + i_stage]
         stage = ShuffleNetV2Stage(out_channels, stage_repeat)
-        net.append(stage)
+        net.add("stage{}".format(i_stage + 2), stage)
 
     # Conv5
-    net.append(_1x1_conv_bn_relu(channels[-1]))
+    net.add("stage5", _1x1_conv_bn_relu(channels[-1]))
 
     return net
 
@@ -174,16 +220,14 @@ def ShuffleNetV2(k, out_size):
 
     """
     # We do not flatten to ease reuse of features.
-    return seq(
-        "ShuffleNetV2",
-        ShuffleNetV2Features(k),
-        seq(
-            "Head",
+    return Seq(
+        features=ShuffleNetV2Features(k),
+        head=Seq(
             # Global pooling (compute mean of each channel). We leave
             # keepdims=False to get a NxC array (with H and W removed and not
             # set to 1).
-            fun.partial(F.mean, axis=(2, 3)),
-            L.Linear(None, out_size)))
+            global_pool=fun.partial(F.mean, axis=(2, 3)),
+            fc=L.Linear(None, out_size)))
 
 
 def test_shufflenet_features():
@@ -215,7 +259,7 @@ def test_use_features():
     import numpy as np
     with chainer.using_config('train', False):
         net = ShuffleNetV2(1, 2)
-        features = net[0]
+        features = net['features']
         data = np.random.random((10, 3, 123, 567)).astype(np.float32)
         ret = features(data)
         assert ret.data.shape[:2] == (10, 1024)
