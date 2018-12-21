@@ -66,14 +66,51 @@ class Seq(chainer.Chain):
     def __str__(self):
         return self.to_string()
 
+class BatchNormalization(L.BatchNormalization):
+    def __init__(self, *args, **kwargs):
+        L.BatchNormalization.__init__(self, *args, **kwargs)
 
+    def __call__(self, *args, **kwargs):
+        # log.debug("batch norm finetune=%s", finetune)
+        if 'finetune' not in kwargs:
+            finetune = getattr(chainer.config, 'finetune', False)
+            kwargs['finetune'] = finetune
+        return L.BatchNormalization.__call__(self, *args, **kwargs)
+
+    # problem:
+    # - avg_mean and avg_var are initialized at None
+    # - when not giving the size to BatchNotmalization, they get
+    #   initialized at the beginning of forward()
+    # - but they are always initialized on the cpu, even if one has called
+    #   to_gpu() on the BN first
+    # - so we get an error when running forward if the BN has been moved
+    #   to gpu, since avg_mean and avg_var are still on cpu   
+    def _initialize_params(self, shape):
+        dtype = self._dtype
+        self.avg_mean = self._init_array(self._initial_avg_mean, 0, shape, dtype) # Ronan
+        self._initial_avg_mean = None
+        self.register_persistent('avg_mean')
+        self.avg_var = self._init_array(self._initial_avg_var, 1, shape, dtype) # Ronan
+        self._initial_avg_var = None
+        self.register_persistent('avg_var')
+        if self.gamma is not None:
+            self.gamma.initialize(shape)
+        if self.beta is not None:
+            self.beta.initialize(shape)   
+
+    def _init_array(self, initializer, default_value, size, dtype):
+        if initializer is None:
+            initializer = default_value
+        initializer = chainer.initializers._get_initializer(initializer)
+        return chainer.initializers.generate_array(initializer, size, self.xp, dtype=dtype)
+            
 def _1x1_conv_bn_relu(out_channels):
     """1x1 Conv + BN + ReLU.
     """
     return Seq(
         conv=L.Convolution2D(
             None, out_channels, ksize=1, stride=1, pad=0, nobias=True),
-        bn=L.BatchNormalization(axis=(0, 2, 3)),
+        bn=BatchNormalization(axis=(0, 2, 3)),
         relu=F.relu)
 
 
@@ -88,7 +125,7 @@ def _3x3_dwconv_bn(stride):
             stride=stride,
             pad=1,
             nobias=True),
-        bn=L.BatchNormalization(axis=(0, 2, 3)))
+        bn=BatchNormalization(axis=(0, 2, 3)))
 
 
 class ShuffleNetV2BasicBlock(chainer.Chain):
@@ -195,7 +232,7 @@ def ShuffleNetV2Features(k):
     stage1 = Seq(
         conv=L.Convolution2D(
             3, channels[0], ksize=3, stride=2, pad=1, nobias=True),
-        bn=L.BatchNormalization(axis=(0, 2, 3)),
+        bn=BatchNormalization(axis=(0, 2, 3)),
         relu=F.relu,
         max_pool=fun.partial(
             F.max_pooling_2d, ksize=3, stride=2, pad=1, cover_all=False))
