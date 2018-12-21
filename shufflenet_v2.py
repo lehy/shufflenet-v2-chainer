@@ -66,6 +66,7 @@ class Seq(chainer.Chain):
     def __str__(self):
         return self.to_string()
 
+
 class BatchNormalization(L.BatchNormalization):
     def __init__(self, *args, **kwargs):
         L.BatchNormalization.__init__(self, *args, **kwargs)
@@ -84,26 +85,30 @@ class BatchNormalization(L.BatchNormalization):
     # - but they are always initialized on the cpu, even if one has called
     #   to_gpu() on the BN first
     # - so we get an error when running forward if the BN has been moved
-    #   to gpu, since avg_mean and avg_var are still on cpu   
+    #   to gpu, since avg_mean and avg_var are still on cpu
     def _initialize_params(self, shape):
         dtype = self._dtype
-        self.avg_mean = self._init_array(self._initial_avg_mean, 0, shape, dtype) # Ronan
+        self.avg_mean = self._init_array(self._initial_avg_mean, 0, shape,
+                                         dtype)  # Ronan
         self._initial_avg_mean = None
         self.register_persistent('avg_mean')
-        self.avg_var = self._init_array(self._initial_avg_var, 1, shape, dtype) # Ronan
+        self.avg_var = self._init_array(self._initial_avg_var, 1, shape,
+                                        dtype)  # Ronan
         self._initial_avg_var = None
         self.register_persistent('avg_var')
         if self.gamma is not None:
             self.gamma.initialize(shape)
         if self.beta is not None:
-            self.beta.initialize(shape)   
+            self.beta.initialize(shape)
 
     def _init_array(self, initializer, default_value, size, dtype):
         if initializer is None:
             initializer = default_value
         initializer = chainer.initializers._get_initializer(initializer)
-        return chainer.initializers.generate_array(initializer, size, self.xp, dtype=dtype)
-            
+        return chainer.initializers.generate_array(
+            initializer, size, self.xp, dtype=dtype)
+
+
 def _1x1_conv_bn_relu(out_channels):
     """1x1 Conv + BN + ReLU.
     """
@@ -206,6 +211,21 @@ def log_size(x, name):
     return x
 
 
+def run_dummy(model):
+    """Run a dummy batch through a model.
+
+    This is useful to initialize all arrays inside the model.  When
+    sizes are not specified, some arrays are initialized lazily on the
+    first run.  This is a problem if you want to load_npz() the
+    parameters of the model, since not all parameters are yet created.
+    """
+    with chainer.using_config('train', False):
+        with chainer.using_config('enable_backprop', False):
+            dummy_batch = (model.xp.random.random(
+                (1, 3, 224, 224)) * 255).astype(model.xp.float32)
+            model(dummy_batch)
+
+
 def ShuffleNetV2Features(k):
     """Create a ShuffleNet v2 network that computes a (1024, fw, fh)
        feature tensor.
@@ -247,6 +267,7 @@ def ShuffleNetV2Features(k):
     # Conv5
     net.add("stage5", _1x1_conv_bn_relu(channels[-1]))
 
+    run_dummy(net)
     return net
 
 
@@ -257,7 +278,7 @@ def ShuffleNetV2(k, out_size):
 
     """
     # We do not flatten to ease reuse of features.
-    return Seq(
+    net = Seq(
         features=ShuffleNetV2Features(k),
         head=Seq(
             # Global pooling (compute mean of each channel). We leave
@@ -265,6 +286,8 @@ def ShuffleNetV2(k, out_size):
             # set to 1).
             global_pool=fun.partial(F.mean, axis=(2, 3)),
             fc=L.Linear(None, out_size)))
+    run_dummy(net)
+    return net
 
 
 def test_shufflenet_features():
