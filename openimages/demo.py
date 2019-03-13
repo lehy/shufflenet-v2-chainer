@@ -9,10 +9,11 @@ import time
 def main(args):
     with chainer.using_config('train', False):
         with chainer.using_config('enable_backprop', False):
-            snapshot_file = "shufflenet-v2-snapshots/x1/snapshot_iter_335305"
+            snapshot_file = args.snapshot
             label_encoder = chainertools.openimages.openimages_label_encoder(
                 ".")
-            net = shufflenet_v2.ShuffleNetV2(1, label_encoder.num_classes())
+            k = shufflenet_v2.guess_k(snapshot_file)
+            net = shufflenet_v2.ShuffleNetV2(k, label_encoder.num_classes())
             chainer.serializers.load_npz(
                 snapshot_file, net, "updater/model:main/predictor/")
             if args.gpu >= 0:
@@ -47,16 +48,19 @@ def main(args):
                 fps = 1. / dt_filtered
                 print("{:.2f} fps".format(fps))
                 print(list(zip(readable_labels, output[labels_idx])))
-                cv2.imshow("x1", frame)
+                cv2.imshow(snapshot_file, frame)
                 cv2.waitKey(1)
 
 
 def parse_command_line():
-    # TODO: add command line args for snapshot
     parser = argparse.ArgumentParser(
         description="Demonstration of multilabel classification with Shufflenet v2.")
-    parser.add_argument('--gpu', help='Run on gpu (integer id starting at 0) or cpu (-1)', type=int, default=-1)
+    parser.add_argument(
+        '--gpu', help='Run on gpu (integer id starting at 0) or cpu (-1)', type=int, default=-1)
+    parser.add_argument('--snapshot', help='Model snapshot file',
+                        default="shufflenet-v2-snapshots/x1/snapshot_iter_335305")
     return parser.parse_args()
+
 
 if __name__ == '__main__':
     import argparse

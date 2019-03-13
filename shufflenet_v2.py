@@ -236,6 +236,12 @@ CHANNELS = {
 
 
 def guess_k(snapshot_file):
+    """Guess the k (1, 1.5, 2) from a snapshot file containing a trained
+    Shufflenet V2 model. This is useful to load the snapshot, since
+    you need to construct a ShuffleNetV2 object with the right k
+    before loading it.
+
+    """
     ko = {v[1]: k for k, v in CHANNELS.items()}
     with np.load(snapshot_file) as snap:
         out_channels = (
