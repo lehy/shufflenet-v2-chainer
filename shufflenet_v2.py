@@ -4,6 +4,7 @@ import chainer.functions as F
 import functools as fun
 import collections
 import logging
+import numpy as np
 log = logging.getLogger(__name__)
 
 
@@ -80,7 +81,7 @@ class BatchNormalization(L.BatchNormalization):
 
     # problem:
     # - avg_mean and avg_var are initialized at None
-    # - when not giving the size to BatchNotmalization, they get
+    # - when not giving the size to BatchNormalization, they get
     #   initialized at the beginning of forward()
     # - but they are always initialized on the cpu, even if one has called
     #   to_gpu() on the BN first
@@ -226,6 +227,22 @@ def run_dummy(model):
             model(dummy_batch)
 
 
+CHANNELS = {
+    0.5: [24, 48, 96, 192, 1024],
+    1.: [24, 116, 232, 464, 1024],
+    1.5: [24, 176, 352, 704, 1024],
+    2: [24, 244, 488, 976, 1024],
+}
+
+
+def guess_k(snapshot_file):
+    ko = {v[1]: k for k, v in CHANNELS.items()}
+    with np.load(snapshot_file) as snap:
+        out_channels = (
+            snap['updater/model:main/predictor/features/stage2/basic1/branch/conv_bn_relu1/conv/W'].shape[0] * 2)
+    return ko[out_channels]
+
+
 def ShuffleNetV2Features(k):
     """Create a ShuffleNet v2 network that computes a (1024, fw, fh)
        feature tensor.
@@ -235,17 +252,11 @@ def ShuffleNetV2Features(k):
 
     """
     stage_repeats = [4, 8, 4]
-    known_channels = {
-        0.5: [24, 48, 96, 192, 1024],
-        1.: [24, 116, 232, 464, 1024],
-        1.5: [24, 176, 352, 704, 1024],
-        2: [24, 244, 488, 976, 1024],
-    }
     try:
-        channels = known_channels[k]
+        channels = CHANNELS[k]
     except KeyError:
         raise KeyError("unsupported k={}, supported values are {}".format(
-            k, known_channels.keys()))
+            k, CHANNELS.keys()))
 
     net = Seq()
 
